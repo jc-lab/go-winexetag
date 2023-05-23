@@ -2,8 +2,9 @@ package winexetag
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
@@ -19,9 +20,6 @@ import (
 )
 
 const (
-	// rsaKeyBits is the number of bits in the RSA modulus of the key that
-	// we generate.
-	rsaKeyBits = 2048
 	// notBeforeTime and notAfterTime are the validity period of the
 	// certificate that we generate. They are deliberately set so that they
 	// are already expired.
@@ -94,7 +92,7 @@ func SetTagCertTag(signedData *signedData, tag []byte) ([]byte, error) {
 	notBefore := parseUnixTimeOrDie(notBeforeTime)
 	notAfter := parseUnixTimeOrDie(notAfterTime)
 
-	priv, err := rsa.GenerateKey(rand.Reader, rsaKeyBits)
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +106,7 @@ func SetTagCertTag(signedData *signedData, tag []byte) ([]byte, error) {
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		SignatureAlgorithm:    x509.SHA1WithRSA,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
 	}
@@ -125,7 +123,7 @@ func SetTagCertTag(signedData *signedData, tag []byte) ([]byte, error) {
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
-		SignatureAlgorithm:    x509.SHA1WithRSA,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
 		BasicConstraintsValid: true,
 		IsCA:                  false,
 		ExtraExtensions: []pkix.Extension{
