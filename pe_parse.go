@@ -6,9 +6,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/lunixbochs/struc"
 	"io"
 )
-
 
 // processAttributeCertificates parses an attribute certificates section of a
 // PE file and returns the ASN.1 data and trailing data of the sole attribute
@@ -73,102 +73,91 @@ type signedData struct {
 // the attribute certificates section in the file, or an error. If found, it
 // additionally returns an offset to the location in the file where the size of
 // the table is stored.
-func getAttributeCertificates(bin []byte) (offset, size, sizeOffset int, err error) {
-	// offsetOfPEHeaderOffset is the offset into the binary where the
-	// offset of the PE header is found.
-	const offsetOfPEHeaderOffset = 0x3c
-	if len(bin) < offsetOfPEHeaderOffset+4 {
-		err = errors.New("binary truncated")
+func getAttributeCertificates(reader io.ReadSeeker) (offset int64, size int, sizeOffset int64, err error) {
+	var dosHeader IMAGE_DOS_HEADER
+	var fileHeader IMAGE_FILE_HEADER
+
+	if _, err = reader.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	if err = dosHeader.ReadFrom(reader); err != nil {
 		return
 	}
 
-	peOffset := int(binary.LittleEndian.Uint32(bin[offsetOfPEHeaderOffset:]))
-	if peOffset < 0 || peOffset+4 < peOffset {
-		err = errors.New("overflow finding PE signature")
+	peHeaderOffset := dosHeader.Lfanew
+	if _, err = reader.Seek(int64(peHeaderOffset), io.SeekStart); err != nil {
 		return
 	}
-	if len(bin) < peOffset+4 {
-		err = errors.New("binary truncated")
+
+	peSignatureBuf := make([]byte, 4)
+	if _, err = io.ReadFull(reader, peSignatureBuf); err != nil {
 		return
 	}
-	pe := bin[peOffset:]
-	if !bytes.Equal(pe[:4], []byte{'P', 'E', 0, 0}) {
+	if !bytes.Equal(peSignatureBuf, IMAGE_NT_HEADER_SIGNATURE) {
 		err = errors.New("PE header not found at expected offset")
 		return
 	}
 
-	r := io.Reader(bytes.NewReader(pe[4:]))
-	var fileHeader fileHeader
-	if err = binary.Read(r, binary.LittleEndian, &fileHeader); err != nil {
+	if err = fileHeader.ReadFrom(reader); err != nil {
 		return
 	}
 
-	if fileHeader.Characteristics&coffCharacteristicExecutableImage == 0 {
-		err = errors.New("file is not an executable image")
+	if fileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 && fileHeader.Machine != IMAGE_FILE_MACHINE_I386 {
+		err = errors.New("not supported machine")
 		return
 	}
 
-	if fileHeader.Characteristics&coffCharacteristicDLL != 0 {
-		err = errors.New("file is a DLL")
+	optionalHeaderRaw := make([]byte, fileHeader.SizeOfOptionalHeader)
+	if _, err = io.ReadFull(reader, optionalHeaderRaw); err != nil {
 		return
 	}
-
-	r = io.LimitReader(r, int64(fileHeader.SizeOfOptionalHeader))
-	var optionalHeader optionalHeader
-	if err = binary.Read(r, binary.LittleEndian, &optionalHeader); err != nil {
-		return
-	}
+	optionalHeaderReader := bytes.NewReader(optionalHeaderRaw)
 
 	// addressSize is the size of various fields in the Windows-specific
 	// header to follow.
 	var addressSize int
+	var baseOfData uint32
+	var numOfDirectoryEntries uint32
 
-	switch optionalHeader.Magic {
-	case pe32PlusMagic:
-		addressSize = 8
-	case pe32Magic:
-		addressSize = 4
-
-		// PE32 contains an additional field in the optional header.
-		var baseOfData uint32
-		if err = binary.Read(r, binary.LittleEndian, &baseOfData); err != nil {
+	if fileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 {
+		var optionalHeader IMAGE_OPTIONAL_HEADER64
+		if err = optionalHeader.ReadFrom(optionalHeaderReader); err != nil {
 			return
 		}
-	default:
-		err = fmt.Errorf("unknown magic in optional header: %x", optionalHeader.Magic)
-		return
+		addressSize = 8
+		baseOfData = optionalHeader.BaseOfCode
+		numOfDirectoryEntries = optionalHeader.NumberOfRvaAndSizes
+	} else if fileHeader.Machine == IMAGE_FILE_MACHINE_I386 {
+		var optionalHeader IMAGE_OPTIONAL_HEADER32
+		if err = optionalHeader.ReadFrom(optionalHeaderReader); err != nil {
+			return
+		}
+		addressSize = 4
+		baseOfData = optionalHeader.BaseOfData
+		numOfDirectoryEntries = optionalHeader.NumberOfRvaAndSizes
+	} else {
 	}
 
-	// Skip the Windows-specific header section up to the number of data
-	// directory entries.
-	toSkip := addressSize + 40 + addressSize*4 + 4
-	skipBuf := make([]byte, toSkip)
-	if _, err = r.Read(skipBuf); err != nil {
-		return
+	_ = addressSize
+	_ = baseOfData
+
+	//dataDirectoriesRaw := make([]byte, 8*numOfDirectoryEntries)
+	//if _, err = io.ReadFull(reader, dataDirectoriesRaw); err != nil {
+	//	return
+	//}
+
+	dataDirectories := make([]IMAGE_DATA_DIRECTORY, numOfDirectoryEntries)
+	for i := 0; i < int(numOfDirectoryEntries); i++ {
+		if err = struc.Unpack(optionalHeaderReader, &dataDirectories[i]); err != nil {
+			return
+		}
 	}
 
-	// Read the number of directory entries, which is also the last value
-	// in the Windows-specific header.
-	var numDirectoryEntries uint32
-	if err = binary.Read(r, binary.LittleEndian, &numDirectoryEntries); err != nil {
-		return
-	}
-
-	if numDirectoryEntries > 4096 {
-		err = fmt.Errorf("invalid number of directory entries: %d", numDirectoryEntries)
-		return
-	}
-
-	dataDirectory := make([]dataDirectory, numDirectoryEntries)
-	if err = binary.Read(r, binary.LittleEndian, dataDirectory); err != nil {
-		return
-	}
-
-	if numDirectoryEntries <= certificateTableIndex {
+	if numOfDirectoryEntries <= certificateTableIndex {
 		err = errors.New("file does not have enough data directory entries for a certificate")
 		return
 	}
-	certEntry := dataDirectory[certificateTableIndex]
+	certEntry := dataDirectories[certificateTableIndex]
 	if certEntry.VirtualAddress == 0 {
 		err = errors.New("file does not have certificate data")
 		return
@@ -180,23 +169,15 @@ func getAttributeCertificates(bin []byte) (offset, size, sizeOffset int, err err
 		return
 	}
 
-	if int(certEntryEnd) != len(bin) {
-		err = fmt.Errorf("certificate entry is not at end of file: %d vs %d", int(certEntryEnd), len(bin))
-		return
-	}
-
-	var dummyByte [1]byte
-	if _, readErr := r.Read(dummyByte[:]); readErr == nil || readErr != io.EOF {
-		err = errors.New("optional header contains extra data after data directory")
-		return
-	}
-
-	offset = int(certEntry.VirtualAddress)
+	offset = int64(certEntry.VirtualAddress)
 	size = int(certEntry.Size)
-	sizeOffset = int(peOffset) + 4 + fileHeaderSize + int(fileHeader.SizeOfOptionalHeader) - 8*(int(numDirectoryEntries)-certificateTableIndex) + 4
+	sizeOffset = int64(peHeaderOffset) + 4 + IMAGE_FILE_HEADER_SIZE + int64(fileHeader.SizeOfOptionalHeader) - 8*(int64(numOfDirectoryEntries)-certificateTableIndex) + 4
 
-	if binary.LittleEndian.Uint32(bin[sizeOffset:]) != certEntry.Size {
-		err = errors.New("internal error when calculating certificate data size offset")
+	if _, err = reader.Seek(sizeOffset, io.SeekStart); err != nil {
+		return
+	}
+	buf := make([]byte, size)
+	if _, err = io.ReadFull(reader, buf); err != nil {
 		return
 	}
 
@@ -244,4 +225,3 @@ func parseSignedData(asn1Data []byte) (*signedData, error) {
 	}
 	return &signedData, nil
 }
-

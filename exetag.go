@@ -7,14 +7,16 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"time"
 )
-
 
 const (
 	// rsaKeyBits is the number of bits in the RSA modulus of the key that
@@ -27,36 +29,6 @@ const (
 	notAfterTime  = "Mon Apr 1 10:00:00 UTC 2019"
 )
 
-// The structures here were taken from "Microsoft Portable Executable and
-// Common Object File Format Specification".
-
-const fileHeaderSize = 20
-
-// fileHeader represents the IMAGE_FILE_HEADER structure from
-// http://msdn.microsoft.com/en-us/library/windows/desktop/ms680313(v=vs.85).aspx.
-type fileHeader struct {
-	Machine               uint16
-	NumberOfSections      uint16
-	TimeDateStamp         uint32
-	PointerForSymbolTable uint32
-	NumberOfSymbols       uint32
-	SizeOfOptionalHeader  uint16
-	Characteristics       uint16
-}
-
-// optionalHeader represents the IMAGE_OPTIONAL_HEADER structure from
-// http://msdn.microsoft.com/en-us/library/windows/desktop/ms680339(v=vs.85).aspx.
-type optionalHeader struct {
-	Magic                   uint16
-	MajorLinkerVersion      uint8
-	MinorLinkerVersion      uint8
-	SizeOfCode              uint32
-	SizeOfInitializedData   uint32
-	SizeOfUninitializedData uint32
-	AddressOfEntryPoint     uint32
-	BaseOfCode              uint32
-}
-
 // dataDirectory represents the IMAGE_DATA_DIRECTORY structure from
 // http://msdn.microsoft.com/en-us/library/windows/desktop/ms680305(v=vs.85).aspx.
 type dataDirectory struct {
@@ -65,7 +37,7 @@ type dataDirectory struct {
 }
 
 // A subset of the known COFF "characteristic" flags found in
-// fileHeader.Characteristics.
+// IMAGE_FILE_HEADER.Characteristics.
 const (
 	coffCharacteristicExecutableImage = 2
 	coffCharacteristicDLL             = 0x2000
@@ -195,7 +167,7 @@ const (
 type Binary interface {
 	GetTagCert() (cert *x509.Certificate, index int, err error)
 	GetTag() (tag []byte, err error)
-	SetTag(tag []byte) (contents []byte, err error)
+	SetTag(writer io.Writer, tag []byte) (err error)
 }
 
 // oidTagCert is an OID that we use for the extension in the superfluous
@@ -213,37 +185,66 @@ func parseUnixTimeOrDie(unixTime string) time.Time {
 // NewBinary returns a Binary that contains details of the PE32 or MSI binary given in |contents|.
 // |contents| is modified if it is an MSI file.
 func NewBinary(contents []byte) (Binary, error) {
-	pe, peErr := NewPE32Binary(contents)
+	pe, peErr := NewPE32Binary(bytes.NewReader(contents))
 	if peErr == nil {
 		return pe, peErr
 	}
-	msi, msiErr := NewMSIBinary(contents)
-	if msiErr == nil {
-		return msi, msiErr
-	}
-	return nil, errors.New("Could not parse input as either PE32 or MSI:\nPE32: " + peErr.Error() + "\nMSI: " + msiErr.Error())
+	//msi, msiErr := NewMSIBinary(contents)
+	//if msiErr == nil {
+	//	return msi, msiErr
+	//}
+	return nil, errors.New("Could not parse input as either PE32 or MSI:\nPE32: " + peErr.Error()) //  + "\nMSI: " + msiErr.Error()
 }
 
 // buildBinary builds a PE binary based on bin but with the given SignedData
 // and appended tag.
-func (bin *PE32Binary) buildBinary(asn1Data, tag []byte) (contents []byte, err error) {
-	contents = append(contents, bin.contents[:bin.certSizeOffset]...)
+func (bin *PE32Binary) buildBinary(writer io.Writer, asn1Data, tag []byte) (err error) {
+	if _, err = bin.reader.Seek(0, io.SeekStart); err != nil {
+		return
+	}
+	if _, err = io.CopyN(writer, bin.reader, bin.certSizeOffset); err != nil {
+		return
+	}
+	// Certificate Data Directory's Size Offset
+
 	for (len(asn1Data)+len(tag))&7 > 0 {
 		tag = append(tag, 0)
 	}
 	attrCertSectionLen := uint32(8 + len(asn1Data) + len(tag))
+
+	// Update Certificate Data Directory's Size
 	var lengthBytes [4]byte
 	binary.LittleEndian.PutUint32(lengthBytes[:], attrCertSectionLen)
-	contents = append(contents, lengthBytes[:4]...)
-	contents = append(contents, bin.contents[bin.certSizeOffset+4:bin.attrCertOffset]...)
+	if _, err = writer.Write(lengthBytes[:4]); err != nil {
+		return
+	}
+
+	// Copy before certificate content
+	if _, err = bin.reader.Seek(bin.certSizeOffset+4, io.SeekStart); err != nil {
+		return
+	}
+	if _, err = io.CopyN(writer, bin.reader, bin.attrCertOffset-(bin.certSizeOffset+4)); err != nil {
+		return
+	}
 
 	var header [8]byte
 	binary.LittleEndian.PutUint32(header[:], attrCertSectionLen)
 	binary.LittleEndian.PutUint16(header[4:], attributeCertificateRevision)
 	binary.LittleEndian.PutUint16(header[6:], attributeCertificateTypePKCS7SignedData)
-	contents = append(contents, header[:]...)
-	contents = append(contents, asn1Data...)
-	return append(contents, tag...), nil
+	if _, err = writer.Write(header[:]); err != nil {
+		return
+	}
+
+	println(hex.EncodeToString(asn1Data))
+	println(base64.StdEncoding.EncodeToString(asn1Data))
+
+	if _, err = writer.Write(asn1Data); err != nil {
+		return
+	}
+	if _, err = writer.Write(tag); err != nil {
+		return
+	}
+	return nil
 }
 
 func (bin *PE32Binary) GetTag() (tag []byte, err error) {
@@ -258,7 +259,7 @@ func (bin *PE32Binary) GetTag() (tag []byte, err error) {
 
 	for _, xt := range crt.Extensions {
 		if xt.Id.Equal(oidTagCert) {
-			return bytes.TrimRight(xt.Value, "\000") , nil
+			return bytes.TrimRight(xt.Value, "\000"), nil
 		}
 	}
 

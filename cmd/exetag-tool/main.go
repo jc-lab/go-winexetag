@@ -81,13 +81,15 @@ func main() {
 			os.Exit(1)
 		}
 
-		contents, err := bin.SetTag(tagContents)
+		writer, err := os.OpenFile(*outFilename, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error while setting superfluous certificate tag: %s\n", err)
+			fmt.Fprintf(os.Stderr, "Error while open output file: %v\n", err)
 			os.Exit(1)
 		}
-		if err := ioutil.WriteFile(*outFilename, contents, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "Error while writing updated file: %s\n", err)
+		defer writer.Close()
+
+		if err = bin.SetTag(writer, tagContents); err != nil {
+			fmt.Fprintf(os.Stderr, "Error while setting superfluous certificate tag: %s\n", err)
 			os.Exit(1)
 		}
 		didSomething = true
@@ -103,5 +105,3 @@ func main() {
 		}
 	}
 }
-
-
