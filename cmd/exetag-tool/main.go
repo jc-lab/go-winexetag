@@ -19,7 +19,7 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	exetag "github.com/ianatha/go-winexetag"
+	exetag "github.com/jclab-joseph/go-winexetag"
 	"io/ioutil"
 	"os"
 	"strings"
