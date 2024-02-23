@@ -185,10 +185,10 @@ func NewBinary(contents []byte) (Binary, error) {
 	if peErr == nil {
 		return pe, peErr
 	}
-	//msi, msiErr := NewMSIBinary(contents)
-	//if msiErr == nil {
-	//	return msi, msiErr
-	//}
+	msi, msiErr := NewMSIBinary(contents)
+	if msiErr == nil {
+		return msi, msiErr
+	}
 	return nil, errors.New("Could not parse input as either PE32 or MSI:\nPE32: " + peErr.Error()) //  + "\nMSI: " + msiErr.Error()
 }
 

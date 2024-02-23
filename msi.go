@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	fmt "fmt"
+	"io"
 	"os"
 )
 
@@ -460,13 +461,13 @@ func (bin *MSIBinary) ensureFreeDifatEntry() {
 // buildBinary builds an MSI binary based on bin but with the given SignedData and appended tag.
 // Appended tag is not supported for MSI.
 // buildBinary may add free sectors to |bin|, but otherwise does not modify it.
-func (bin *MSIBinary) buildBinary(signedData, tag []byte) ([]byte, error) {
+func (bin *MSIBinary) buildBinary(writer io.Writer, signedData, tag []byte) error {
 	if len(tag) > 0 {
-		return nil, errors.New("appended tags not supported in MSI files")
+		return errors.New("appended tags not supported in MSI files")
 	}
 	// Writing to the mini FAT is not supported.
 	if len(signedData) < miniStreamCutoffSize {
-		return nil, fmt.Errorf("writing SignedData less than %d bytes is not supported", len(signedData))
+		return fmt.Errorf("writing SignedData less than %d bytes is not supported", len(signedData))
 	}
 	// Ensure enough free FAT entries for the signedData.
 	numSignedDataSectors := secT((offT(len(signedData))-1)/bin.sector.Size) + 1
@@ -534,7 +535,13 @@ func (bin *MSIBinary) buildBinary(signedData, tag []byte) ([]byte, error) {
 	// The sectors allocated for signedData were guaranteed contiguous.
 	copy(contents[offT(firstSignedDataSector)*bin.sector.Size:], signedData)
 
-	return append(headerSectorBytes, contents...), nil
+	if _, err := writer.Write(headerSectorBytes); err != nil {
+		return err
+	}
+	if _, err := writer.Write(contents); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (bin *MSIBinary) GetTagCert() (cert *x509.Certificate, index int, err error) {
@@ -545,13 +552,13 @@ func (bin *MSIBinary) GetTagCert() (cert *x509.Certificate, index int, err error
 // superfluous certificate contains the given tag data.
 // The (parsed) bin.signedData is modified; but bin.signedDataBytes, which contains
 // the raw original bytes, is not.
-func (bin *MSIBinary) SetTag(tag []byte) (contents []byte, err error) {
+func (bin *MSIBinary) SetTag(writer io.Writer, tag []byte) (err error) {
 	asn1Bytes, err := SetTagCertTag(bin.signedData, tag)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return bin.buildBinary(asn1Bytes, nil)
+	return bin.buildBinary(writer, asn1Bytes, nil)
 }
 
 func (bin *MSIBinary) GetTag() (tag []byte, err error) {
@@ -568,4 +575,3 @@ func (bin *MSIBinary) GetTag() (tag []byte, err error) {
 
 	return nil, os.ErrNotExist
 }
-
