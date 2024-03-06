@@ -38,7 +38,7 @@ publishing {
             from(components["java"])
 
             pom {
-                name.set(project.name)
+                name.set("winexetag")
                 description.set("go-winexetag for java")
                 url.set("https://github.com/jclab-joseph/go-winexetag")
                 licenses {
